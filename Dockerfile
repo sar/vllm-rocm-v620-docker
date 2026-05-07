@@ -35,7 +35,6 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:$PATH"
 
 # ONLY install what the base image doesn't have. 
-# DO NOT reinstall rocm-hip-sdk or rocm-device-libs; the base image already has them.
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake git ninja-build \
@@ -46,16 +45,21 @@ RUN --mount=type=cache,target=/var/cache/apt \
 # =============================================================================
 FROM builder AS vllm-build
 
-# FIX: Changed /opt/venv to /opt/vllm-env to avoid colliding with the 
-# pre-existing /opt/venv directory in the rocm/pytorch base image.
+# Use /opt/vllm-env to avoid colliding with base image's /opt/venv
 RUN uv venv /opt/vllm-env --system-site-packages
 ENV VIRTUAL_ENV=/opt/vllm-env \
     PATH="/opt/vllm-env/bin:$PATH" \
     UV_PROJECT_ENVIRONMENT=/opt/vllm-env
 
-# Pre-install Python dependencies using uv (fast)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install \
+# Prevent package managers from overwriting the base image's ROCm PyTorch with CUDA wheels.
+# We extract the exact version already installed and lock it.
+RUN python -c "import torch; print(f'torch=={torch.__version__}')" > /tmp/constraints.txt
+
+# Pre-install Python dependencies using pip instead of uv. 
+# pip handles --system-site-packages better and won't overwrite the ROCm torch
+# if it sees it's already satisfied and constrained.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -c /tmp/constraints.txt \
     "transformers>=4.53.0" \
     "ray[default]>=2.40.0" \
     "pydantic>=2.10.0" \
@@ -71,15 +75,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     "xgrammar>=0.1.10" \
     "lm-format-enforcer>=0.10.0"
 
+# Pre-install vLLM build dependencies required because we use --no-build-isolation
+RUN pip install setuptools_scm wheel ninja
+
 # Clone vLLM v0.20.0
 ARG VLLM_VERSION=v0.20.0
 RUN git clone --depth 1 --branch ${VLLM_VERSION} https://github.com/vllm-project/vllm.git /tmp/vllm-src
 WORKDIR /tmp/vllm-src
 
-# Build vLLM. 
-# CRITICAL: Using `pip` instead of `uv` here. If the C++ build fails, `pip` 
-# immediately fails with the real compiler error. `uv` falls back to PyPI, 
-# grabs the CUDA wheel, and masks the error with httplib exceptions.
+# Build vLLM.
 # --no-build-isolation uses the base image's PyTorch ROCm headers.
 RUN --mount=type=cache,target=/root/.cache/pip \
     GPU_TARGETS=gfx1030 \
@@ -88,10 +92,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     VLLM_FLASH_ATTN=0 \
     VLLM_FLASHINFER=0 \
     MAX_JOBS=$(nproc) \
-    pip install --no-cache-dir --no-build-isolation -v . 2>&1 | tee /tmp/vllm_build.log
+    pip install --no-cache-dir --no-build-isolation -c /tmp/constraints.txt -v . 2>&1 | tee /tmp/vllm_build.log
 
-# Verify build succeeded
-RUN python -c "import vllm; print(f'✅ vLLM {vllm.__version__} installed')" || { \
+# Verify build succeeded. 
+# CRITICAL: Run from '/' so it checks the INSTALLED package in site-packages,
+# not the local /tmp/vllm-src folder which will false-positive.
+RUN cd / && python -c "import vllm; print(f'✅ vLLM {vllm.__version__} installed')" || { \
     echo "❌ Build failed. Compiler errors:"; \
     grep -i "error\|fatal\|hipcc: error" /tmp/vllm_build.log | tail -30; \
     exit 1; }
