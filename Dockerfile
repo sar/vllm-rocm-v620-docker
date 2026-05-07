@@ -69,8 +69,9 @@ RUN uv pip install --no-cache \
     "lm-format-enforcer>=0.10.0"
 
 ARG VLLM_VERSION=v0.20.0
-RUN git clone --depth 1 --branch ${VLLM_VERSION} https://github.com/vllm-project/vllm.git /tmp/vllm-src
-WORKDIR /tmp/vllm-src
+RUN mkdir -p /workspace && \
+    git clone --depth 1 --branch ${VLLM_VERSION} https://github.com/vllm-project/vllm.git /workspace/vllm-src
+WORKDIR /workspace/vllm-src
 
 # ---- Build vLLM ----
 # CRITICAL CHANGES:
@@ -86,12 +87,12 @@ RUN GPU_TARGETS=gfx1030 \
     VLLM_FLASH_ATTN=0 \
     VLLM_FLASHINFER=0 \
     MAX_JOBS=$(nproc) \
-    pip install --no-cache-dir --no-build-isolation -v . 2>&1 | tee /tmp/vllm_build.log
+    pip install --no-cache-dir --no-build-isolation -v . 2>&1 | tee /workspace/vllm_build.log
 
 # Verify
 RUN python -c "import vllm; print(f'✅ vLLM {vllm.__version__} installed')" || { \
     echo "❌ Build failed. Real compiler error above or in log:"; \
-    grep -i "error\|fatal\|hipcc: error" /tmp/vllm_build.log | tail -30; \
+    grep -i "error\|fatal\|hipcc: error" /workspace/vllm_build.log | tail -30; \
     exit 1; }
 
 # =============================================================================
