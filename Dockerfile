@@ -46,10 +46,12 @@ RUN --mount=type=cache,target=/var/cache/apt \
 # =============================================================================
 FROM builder AS vllm-build
 
-RUN uv venv /opt/venv --system-site-packages
-ENV VIRTUAL_ENV=/opt/venv \
-    PATH="/opt/venv/bin:$PATH" \
-    UV_PROJECT_ENVIRONMENT=/opt/venv
+# FIX: Changed /opt/venv to /opt/vllm-env to avoid colliding with the 
+# pre-existing /opt/venv directory in the rocm/pytorch base image.
+RUN uv venv /opt/vllm-env --system-site-packages
+ENV VIRTUAL_ENV=/opt/vllm-env \
+    PATH="/opt/vllm-env/bin:$PATH" \
+    UV_PROJECT_ENVIRONMENT=/opt/vllm-env
 
 # Pre-install Python dependencies using uv (fast)
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -100,12 +102,12 @@ RUN python -c "import vllm; print(f'✅ vLLM {vllm.__version__} installed')" || 
 FROM base AS final
 
 # Copy the built venv
-COPY --from=vllm-build /opt/venv /opt/venv
+COPY --from=vllm-build /opt/vllm-env /opt/vllm-env
 
 # Set runtime environment
-ENV VIRTUAL_ENV=/opt/venv \
-    PATH="/opt/venv/bin:$PATH" \
-    UV_PROJECT_ENVIRONMENT=/opt/venv \
+ENV VIRTUAL_ENV=/opt/vllm-env \
+    PATH="/opt/vllm-env/bin:$PATH" \
+    UV_PROJECT_ENVIRONMENT=/opt/vllm-env \
     HIP_VISIBLE_DEVICES=all \
     HSA_OVERRIDE_GFX_VERSION=10.3.0 \
     VLLM_TARGET_DEVICE=rocm \
