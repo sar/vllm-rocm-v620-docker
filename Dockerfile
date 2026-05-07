@@ -27,39 +27,33 @@ ENV DEBIAN_FRONTEND=noninteractive \
 WORKDIR /workspace
 
 # =============================================================================
-# Stage 1: Install uv + system build dependencies
+# Stage 1: System build dependencies
 # =============================================================================
 FROM base AS builder
 
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:$PATH"
-
 # ONLY install what the base image doesn't have. 
+# DO NOT reinstall rocm-hip-sdk or rocm-device-libs.
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake git ninja-build \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # =============================================================================
-# Stage 2: Create venv + install deps + compile vLLM
+# Stage 2: Install deps + compile vLLM (Using base's existing /opt/venv)
 # =============================================================================
 FROM builder AS vllm-build
 
-# Use /opt/vllm-env to avoid colliding with base image's /opt/venv
-RUN uv venv /opt/vllm-env --system-site-packages
-ENV VIRTUAL_ENV=/opt/vllm-env \
-    PATH="/opt/vllm-env/bin:$PATH" \
-    UV_PROJECT_ENVIRONMENT=/opt/vllm-env
+# The base image already activates /opt/venv via ENV PATH.
+# We do NOT create a new venv. We install directly into the base's venv.
+# Because the base's venv already has ROCm PyTorch, pip will see it and 
+# will NOT overwrite it with the CUDA version.
 
-# Prevent package managers from overwriting the base image's ROCm PyTorch with CUDA wheels.
-# We extract the exact version already installed and lock it.
-RUN python -c "import torch; print(f'torch=={torch.__version__}')" > /tmp/constraints.txt
+# Pre-install vLLM build dependencies required because we use --no-build-isolation
+RUN pip install setuptools_scm wheel ninja
 
-# Pre-install Python dependencies using pip instead of uv. 
-# pip handles --system-site-packages better and won't overwrite the ROCm torch
-# if it sees it's already satisfied and constrained.
+# Pre-install vLLM's Python dependencies
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -c /tmp/constraints.txt \
+    pip install \
     "transformers>=4.53.0" \
     "ray[default]>=2.40.0" \
     "pydantic>=2.10.0" \
@@ -75,9 +69,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     "xgrammar>=0.1.10" \
     "lm-format-enforcer>=0.10.0"
 
-# Pre-install vLLM build dependencies required because we use --no-build-isolation
-RUN pip install setuptools_scm wheel ninja
-
 # Clone vLLM v0.20.0
 ARG VLLM_VERSION=v0.20.0
 RUN git clone --depth 1 --branch ${VLLM_VERSION} https://github.com/vllm-project/vllm.git /tmp/vllm-src
@@ -92,7 +83,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     VLLM_FLASH_ATTN=0 \
     VLLM_FLASHINFER=0 \
     MAX_JOBS=$(nproc) \
-    pip install --no-cache-dir --no-build-isolation -c /tmp/constraints.txt -v . 2>&1 | tee /tmp/vllm_build.log
+    pip install --no-cache-dir --no-build-isolation -v . 2>&1 | tee /tmp/vllm_build.log
 
 # Verify build succeeded. 
 # CRITICAL: Run from '/' so it checks the INSTALLED package in site-packages,
@@ -107,14 +98,11 @@ RUN cd / && python -c "import vllm; print(f'✅ vLLM {vllm.__version__} installe
 # =============================================================================
 FROM base AS final
 
-# Copy the built venv
-COPY --from=vllm-build /opt/vllm-env /opt/vllm-env
+# Copy the modified venv from builder with vLLM installed
+COPY --from=builder /opt/venv /opt/venv
 
 # Set runtime environment
-ENV VIRTUAL_ENV=/opt/vllm-env \
-    PATH="/opt/vllm-env/bin:$PATH" \
-    UV_PROJECT_ENVIRONMENT=/opt/vllm-env \
-    HIP_VISIBLE_DEVICES=all \
+ENV HIP_VISIBLE_DEVICES=all \
     HSA_OVERRIDE_GFX_VERSION=10.3.0 \
     VLLM_TARGET_DEVICE=rocm \
     VLLM_USE_TRITON_FLASH_ATTN=0 \

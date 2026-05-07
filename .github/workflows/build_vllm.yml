@@ -9,6 +9,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}/vllm-gfx1030
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # Opt-into Node 24 to suppress deprecation warnings
 
 jobs:
   build-and-push:
