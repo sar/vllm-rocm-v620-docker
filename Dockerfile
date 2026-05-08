@@ -69,13 +69,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     "xgrammar>=0.1.10" \
     "lm-format-enforcer>=0.10.0"
 
-# Clone vLLM v0.20.0
+# Clone vLLM v0.20.0 to /workspace instead of /tmp
 ARG VLLM_VERSION=v0.20.0
-RUN git clone --depth 1 --branch ${VLLM_VERSION} https://github.com/vllm-project/vllm.git /tmp/vllm-src
-WORKDIR /tmp/vllm-src
+RUN git clone --depth 1 --branch ${VLLM_VERSION} https://github.com/vllm-project/vllm.git /workspace/vllm-src
+WORKDIR /workspace/vllm-src
 
 # Build vLLM.
 # --no-build-isolation uses the base image's PyTorch ROCm headers.
+# Log is saved to /workspace so we can keep it in the final image.
 RUN --mount=type=cache,target=/root/.cache/pip \
     GPU_TARGETS=gfx1030 \
     PYTORCH_ROCM_ARCH=gfx1030 \
@@ -83,14 +84,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     VLLM_FLASH_ATTN=0 \
     VLLM_FLASHINFER=0 \
     MAX_JOBS=$(nproc) \
-    pip install --no-cache-dir --no-build-isolation -v . 2>&1 | tee /tmp/vllm_build.log
+    pip install --no-cache-dir --no-build-isolation -v . 2>&1 | tee /workspace/vllm_build.log
 
 # Verify build succeeded. 
 # CRITICAL: Run from '/' so it checks the INSTALLED package in site-packages,
-# not the local /tmp/vllm-src folder which will false-positive.
+# not the local /workspace/vllm-src folder which will false-positive.
 RUN cd / && python -c "import vllm; print(f'✅ vLLM {vllm.__version__} installed')" || { \
     echo "❌ Build failed. Compiler errors:"; \
-    grep -i "error\|fatal\|hipcc: error" /tmp/vllm_build.log | tail -30; \
+    grep -i "error\|fatal\|hipcc: error" /workspace/vllm_build.log | tail -30; \
     exit 1; }
 
 # =============================================================================
@@ -99,7 +100,11 @@ RUN cd / && python -c "import vllm; print(f'✅ vLLM {vllm.__version__} installe
 FROM base AS final
 
 # Copy the modified venv from builder with vLLM installed
-COPY --from=builder /opt/venv /opt/venv
+COPY --from=vllm-build /opt/venv /opt/venv
+
+# Copy the vLLM source and build log into the image for debugging/reference
+COPY --from=vllm-build /workspace/vllm-src /workspace/vllm-src
+COPY --from=vllm-build /workspace/vllm_build.log /workspace/vllm_build.log
 
 # Set runtime environment
 ENV HIP_VISIBLE_DEVICES=all \
@@ -108,7 +113,7 @@ ENV HIP_VISIBLE_DEVICES=all \
     VLLM_USE_TRITON_FLASH_ATTN=0 \
     PYTORCH_TUNABLEOP_ENABLED=0
 
-# Create necessary directories as root
+# Create necessary directories
 RUN mkdir -p /workspace/models /workspace/.cache/huggingface
 
 EXPOSE 8000
